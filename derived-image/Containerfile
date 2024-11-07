@@ -1,0 +1,4 @@
+FROM f40-ato24-bootc
+
+RUN dnf -y install pip mysql
+RUN pip install flask

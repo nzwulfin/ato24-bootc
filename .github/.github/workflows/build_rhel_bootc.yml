@@ -1,0 +1,101 @@
+name: Build RHEL bootc image with GHA
+on:
+  push:
+    paths:
+      - 'rhel/**'
+    branches:
+      - main
+      - cache-testing
+
+jobs:
+  subs:
+    name: Get subscription info
+    runs-on: ubuntu-latest
+    container:
+      image: registry.access.redhat.com/ubi9/ubi
+
+    steps:
+      - name: Clone the repository
+        uses: actions/checkout@v2
+
+      - name: Get podman
+        run: dnf -y install --disablerepo=* --enablerepo=ubi-9-appstream-rpms --enablerepo=ubi-9-baseos-rpms podman subscription-manager zstd
+
+      - name: subscription-access
+        env:
+          SMDEV_CONTAINER_OFF: 1
+          orgid: ${{ secrets.RHT_ORGID }}
+          activation_key: ${{ secrets.RHT_ACT_KEY }}
+        run: subscription-manager register --org=$orgid --activationkey=$activation_key
+      
+      - name: Old skool debug
+        run: ls -R /etc/pki/entitlement
+      
+      - name: Make the dir to cache for buildah
+        run: mkdir -p ./cache-keys
+      
+      - name: Cache sub info
+        uses: actions/cache@v4
+        with:
+          path: ./cache-keys
+          key: "${{ github.run_id }}"
+
+      - name: Make the dir to cache for buildah
+        run: cp /etc/pki/entitlement/* ./cache-keys
+
+  build:
+    needs: subs
+    name: Build image
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: rhel9-bootc-quick
+      REGISTRY: ghcr.io/nzwulfin
+    steps:
+      - name: Clone the repository
+        uses: actions/checkout@v2
+
+      - name: Log in to the RHT terms based registry
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: registry.redhat.io
+          username: ${{ vars.RHT_REG_SVCUSER }}
+          password: ${{ secrets.RHT_REG_SVCPASS }}
+      
+      - name: Cache sub info
+        uses: actions/cache@v4
+        with:
+          path: ./cache-keys
+          key: "${{ github.run_id }}"
+
+      - name: Move Content around
+        run: |
+          sudo mkdir -p /etc/pki/entitlement
+          sudo mv ./cache-keys/* /etc/pki/entitlement
+          sudo rm -rf ./cache-keys
+          ls -lR /etc/pki/entitlement
+
+      - name: Buildah Action
+        id: build-image
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ env.IMAGE_NAME }}
+          tags: latest ${{ github.sha }}
+          containerfiles: |
+            ./rhel/Containerfile
+          extra-args: |
+            -v /etc/pki/entitlement:/etc/pki/entitlement
+
+      - name: Log in to the GitHub Container registry
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GitHub Container Repository
+        id: push-to-ghcr
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build-image.outputs.image }}
+          tags: ${{ steps.build-image.outputs.tags }}
+          registry: ${{ env.REGISTRY }}
